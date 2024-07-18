@@ -1,0 +1,44 @@
+---
+title: "Notas acerca de: Sobredispersión"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Sobredispersión
+  
+Sobredispersión es un término estadístico que se refiere a la situación en la que la variabilidad de los datos es mayor de la que predice un modelo específico. En el contexto de modelos de conteo como el de Poisson, se espera que la media y la varianza sean iguales. Sin embargo, en mucho conjuntos de datos reales, la varianza es mayor que la media, lo que indica sobredispersión.
+
+## Ejemplo de Sobredispersión:
+
+### Datos con Sobredispersión
+
+Imagina que estamos analizando el numero de visitas diarias a una tienda. Supongamos que tenemos los siguientes datos
+
+```{r}
+visitas <- c(2,3,4,8,10,12,15,18,22,25)
+mean(visitas)
+var(visitas)
+```
+En estos datos, la media ($\mu$) es 11.9 y la varianza ($\sigma^2$) es 63.32. Aquí, la varianza es mucho mayor que la media, indicando sobredispersión. Para ajustar mejor estos datos, podríamos usar un modelo binomial negativo (NB2), que permite que la varianza sea mayor que la media.
+
+# Ejemplo sin Sobredispersión
+
+### Datos sin Sobredispersión
+Consideremos un ejemplo diferente donde contamos el número de errores por pagína en un libro. Supogamos que tenemos los siguientes datos:
+```{r}
+errores <- c(2, 2, 3, 3, 3, 4, 4, 4, 5, 5)
+mean(errores)
+var(errores)
+```
+
+En estos datos, la media ($\mu$) es 3.5 y la varianza ($\sigma^2$) es 1.16. Aquí, la varianza es cercana a la media, lo que no indica sobredispersión.
+
+# Importancia de Identificar Sobredispersión
+
+- Modelos Inadecuados: Utilizar un modelo de Poisson en presencia de sobredispersión puede subestimar los errores estándar de los estimadores, llevar a intervalos de confianza estrechos y pruebas de hipótesis incorrectas.
+- Modelos Adecuados: Modelos como el binomial negaivo (NB1 y NB2) ajustan la varianza adicional permitiendo una estomación más precisa de los parámetros y una mejor comprensión de los datos. 
+
+# Conclusión
+
+Identificar y manejar la sobredispersión es crucial en la modelización de datos de conteo. El uso adecuado de modelos como el binomial negativo permite una mejor adaptación a la realidad de los datos y una interpretación más precisa de los resultados. 

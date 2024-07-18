@@ -1,0 +1,1443 @@
+---
+title: "Modelo de frecuencia"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Collective Model in General Insurance
+
+The premium associated to some (annual) risk S is $\pi(S) = (1+\alpha)\mathbb E(S)$ where $\alpha > 0$ denotes some loading, and where $S$ is the annual random loss. Let $(N_t)$ be the count process that denotes the number of claims occurred during period $[0,t]$. Let $(Y_i)$ denote the amount of the ith claim. Then the total loss over period $[0,t]$ is $$S_t = \sum_{i=1}^{N_t} Y_i \ with \ S_t = 0 \ if \ N_t = 0$$
+
+In the case where $\alpha = 0$, this premium is called the pure premium. If $N_1$ and $Y_1,...,Y_n...$ are independent; and if losses $Y_i$ are i.i.d.. then $$\pi = \mathbb E(N)*\mathbb E(Y). $$
+
+The (annual) pure premium is the product of two terms:
+
+-   Claims frequency $\mathbb E(N)$
+
+-   Average cost of individual claims $\mathbb E(Y)$
+
+## Pure Premium in a Heterogenous Context
+
+Consider the case where heterogeneity can be observed, through some binary random variable $Z$ (say low and large risk for, respectively, 50% of the insured). Assume that N has a binomial distribution, with probability either 10% or 20% depending on Z and the loss is deterministic, Y = 100. Then, two choices can be made:
+
+-   The insurance company charger the same premium for all the insured, $pi(z) = \mathbb E(S) = 15 = 0.5*0.2*100+0.5*0.1*100$
+
+-   The insurance company charges a premium taking into account heterogeneity, $\pi(z) = \mathbb E(S|Z = z)$ that will be either 10 ($0.1*100$) or 20 ($0.2*100$), depending on z.
+
+Thus, if Z is the (observed) heterogeneity variable, an insurance company should charge $$\pi(z) = \mathbb E(S|Z=z)*E(Y|Z=z)$$
+
+But assuming that heterogeneity is fully observable is a strong assumption. Instead, the insurance company might have available information, summarized in a vector $\mathbf X$ of information, related to the policyholder, to the car (in the context of car insurance), etc. And some variates can be used to get a good proxy of the unobservable latent factor $Z$. In that case, with non-partially observable heterogeneity, an insurance company should charge $$\pi(\mathbf x) = \mathbb E(S| \mathbf X = \mathbf x) = \mathbb E(N| \mathbf X = \mathbf x) * \mathbb E(Y| \mathbf X = \mathbf x)$$
+
+Thus, the goal will be to propose predictive models to estimate $\mathbb E(N| \mathbf X = \mathbf x)$ , the annualized claims frequency for some insured with characteristics $\mathbf x$, and $\mathbb E(Y| \mathbf X = \mathbf x)$, the average cost of (individual) accidents, claimed by the insured with characteristics $\mathbf x$.
+
+```{r}
+# Establecer el directorio de trabajo (opcional)
+setwd("C:/Users/1024541605/Downloads")
+# Cargar el archivo .rda
+load("freMTPL2freq.rda")
+load("freMTPL2sev.rda")
+load("freMTPLfreq.rda")
+load("freMTPLsev.rda")
+```
+
+## Dataset
+
+The first dataset, contains contract and client information from a French insurance company, related to some motor insurance portafolio.
+
+-   ID, contract number.
+
+-   NB, number of claims during the exposure period.
+
+-   EXPOSURE, exposure, in years.
+
+-   POWER, power of the car.
+
+-   AGECAR, age of car in years.
+
+-   AGEDRIVER, age of driver in years.
+
+-   BRAND, brand of the car.
+
+-   GAZ, with diesel or regular
+
+-   REGION, with different regions, in France.
+
+-   DENSITY, density of inhabitants in the city the driver of the car lives in.
+
+The second dataset, CLAIMS, contain claims information, from the same company.
+
+-   ID, contract number.
+
+-   INDEMNITY, cost of the caim, seen as at a recent date.
+
+## Data Preparation
+
+```{r}
+# Eliminamos la segunda columna del conjunto de datos 'freMTPL2freq' y lo guardamos en 'dat'
+dat <- freMTPLfreq[,-2]
+# Convertimos la columna 'VehGas' en 'dat' a un factor (categoría)
+dat$VehGas <- factor(dat$Gas)
+# Copiamos el conjunto de datos 'freMTPL2sev' en 'sev'
+sev <- freMTPLsev
+# Asignamos el valor 1 a cada fila en la columna 'ClaimNb' de 'sev'
+sev$ClaimNb <- 1
+# Agrupamos los datos en 'sev' por 'PolicyID' y sumamos las columnas 'ClaimAmount' y 'ClaimNb'
+dat0 <- aggregate(cbind(ClaimAmount, ClaimNb) ~ PolicyID, data = sev, FUN = sum)
+# Renombramos la columna 'ClaimAmount' a 'ClaimTotal' en 'dat0'
+names(dat0)[2] <- "ClaimTotal"
+# Fusionamos 'dat' con 'dat0' usando 'PolicyID' como clave, manteniendo todas las filas de 'dat'
+dat <- merge(x = dat, y = dat0, by = "PolicyID", all.x = TRUE)
+# Reemplazamos los valores NA en 'dat' con 0
+dat[is.na(dat)] <- 0
+# Filtramos 'dat' para mantener solo las filas donde 'ClaimNb' es menor o igual a 5
+dat <- dat[which(dat$ClaimNb <= 5),]
+# Limitamos los valores de 'Exposure' en 'dat' a un máximo de 1
+dat$Exposure <- pmin(dat$Exposure, 1)
+# Filtramos 'sev' para mantener solo las filas donde 'PolicyID' está presente en 'dat' y seleccionamos las columnas 1 y 2
+sev <- sev[which(sev$PolicyID %in% dat$PolicyID), c(1, 2)]
+```
+
+```{r}
+unique(dat$Brand)
+```
+
+```{r}
+# Cargar el paquete dplyr
+library(dplyr)
+
+# Crear la nueva columna BRAND basada en las relaciones especificadas
+dat <- dat %>%
+  mutate(BRAND = case_when(
+    Brand %in% c("Renaut Nissan and Citroen") ~ "A",
+    Brand %in% c("Volkswagen, Audi, Skoda and Seat") ~ "B",
+    Brand %in% c("Opel, General Motors and Ford") ~ "C",
+    Brand %in% c("Fiat") ~ "D",
+    Brand %in% c("Mercedes Chrysler and BMW") ~ "E",
+    Brand %in% c("Japanese (except Nissan) or Korean") ~ "F",
+    TRUE ~ "G"  # Para todas las demás marcas
+  ))
+```
+
+### Categorized variables
+
+```{r}
+# Copiamos el conjunto de datos 'dat' a un nuevo dataframe 'CONTRACTS.f'
+CONTRACTS.f <- dat
+# Creamos una nueva columna 'AGEDRIVE' en 'CONTRACTS.f' categorizando 'DrivAge' en rangos específicos
+CONTRACTS.f$AGEDRIVE <- cut(dat$DriverAge, c(17, 22, 26, 42, 74, Inf))
+# Creamos una nueva columna 'AGECAR' en 'CONTRACTS.f' categorizando 'DrivAge' en diferentes rangos, incluyendo el límite inferior
+CONTRACTS.f$AGECAR <- cut(dat$DriverAge, c(0, 1, 4, 15, Inf), include.lowest = TRUE)
+# Creamos una nueva columna 'DENSITY' en 'CONTRACTS.f' categorizando 'Density' en rangos específicos
+CONTRACTS.f$DENSITY <- cut(dat$Density, c(0, 40, 200, 500, 4500, Inf))
+```
+
+## Actuarial Exploration
+
+### Annualized Claims Frequency
+
+Without any explanatory variable, the average annualized frequency and its empirical variance are, respectively, $$m_N = \frac{\sum_{i=1}^{n} Y_i}{\sum_{i=1}^{n} E_i}$$
+
+and $$S_{N}^{2} \frac{\sum_{i=1}^{n}[Y_i - m_N*E_i]^2}{\sum_{i=1}^{n} E_i}$$
+
+```{r}
+# Asignamos las columnas 'ClaimNb' y 'Exposure' a las variables 'vY' y 'vE' respectivamente
+vY <- CONTRACTS.f$ClaimNb
+vE <- CONTRACTS.f$Exposure
+# Calculamos la media de reclamaciones por exposición y la guardamos en 'm'
+m <- sum(vY) / sum(vE)
+# Calculamos la varianza de las reclamaciones por exposición y la guardamos en 'v'
+v <- sum((vY - m * vE)^2) / sum(vE)
+# Imprimimos la media, la varianza y el valor de phi (razón entre varianza y media)
+cat("average =", m, "variance =", v, "phi =", v / m, "\n")
+# Asignamos la columna 'Region' convertida a factor a la variable 'vX'
+vX <- as.factor(CONTRACTS.f$Region)
+```
+
+where phi is such that $S_{N}^{2} = \varphi*m_X$. for a Poisson distribution, $\varphi$ should be equal to 1. Those quantities can also be computed when taking into account categorical covariates. In that case,
+
+$$m_{N,\mathbf x} = \frac{\sum_{i, \mathbf X_i = x} Y_i}{\sum_{i, \mathbf X_i = x} E_i}$$
+
+and $$S_{N, \mathbf x}^{2} \frac{\sum_{i, \mathbf X_i = x}[Y_i - m_N*E_i]^2}{\sum_{i, \mathbf X_i = x}^{n} E_i}$$
+
+```{r}
+# Iteramos sobre cada nivel de la variable 'Region'
+for (i in 1:length(levels(vX))) {
+  # Filtramos las exposiciones y reclamaciones para el nivel actual de 'Region'
+  vEi <- vE[vX == levels(vX)[i]]
+  vYi <- vY[vX == levels(vX)[i]]
+  # Calculamos la media de reclamaciones por exposición para el nivel actual y la guardamos en 'mi'
+  mi <- sum(vYi) / sum(vEi)
+  # Calculamos la varianza de las reclamaciones por exposición para el nivel actual y la guardamos en 'vi'
+  vi <- sum((vYi - mi * vEi)^2) / sum(vEi)
+  # Imprimimos la media, la varianza y el valor de phi para el nivel actual de 'Region'
+  cat("average =", mi, "variance =", vi, "phi =", vi / mi, "\n")
+}
+```
+
+where again phi is such that $S_{N, \mathbf x}^{2} = \varphi*m_{X,x}$.
+
+## Poisson Regression
+
+Let $N_i$ denote the annual claims frequency for insured i, and assume that $N_i \mathcal \sim P(\lambda))$ (so far, all insured have the same $\lambda$). If insured $i$ was observed during a period of time $E_i$ (called exposure), the number of claims is $Y_i \sim \mathcal P(\lambda * E_i)$. To estimate $\lambda$, maximium likelihood techniques can be used, $$ L(\lambda, \mathbf Y, \mathbf E) = \prod_{i=1}^{n} \frac{e^{-\lambda E_i}[\lambda E_i]^{Y_i}}{Y_i!}$$
+
+so that the log-likelihood is $$log L(\lambda, \mathbf Y, \mathbf E) = -\lambda \sum_{i=1}^{n} E_i + \sum_{i=1}^{n} Y_i \ log[\lambda E_i] - log(\prod_{i=1}^{n} Y_i!)$$
+
+Which yields $$\hat \lambda = \frac{\sum_{i=1}^{n} Y_i}{\sum_{i=1}^{n} E_i} = \sum_{i=1}^{n} \omega_i \frac{Y_i}{E_i} \ where \ \omega_i = \frac{E_i}{\sum_{i=1}^{n} E_i}$$
+
+```{r}
+# Asignamos la columna 'ClaimNb' de 'CONTRACTS.f' a la variable 'Y'
+Y <- CONTRACTS.f$ClaimNb
+# Asignamos la columna 'Exposure' de 'CONTRACTS.f' a la variable 'E'
+E <- CONTRACTS.f$Exposure
+# Calculamos el valor de lambda, que es la tasa de reclamaciones promedio por exposición
+(lambda <- sum(Y) / sum(E))
+# Calculamos la media ponderada de la tasa de reclamaciones por exposición, ponderada por la exposición
+weighted.mean(Y / E, E)
+# Calculamos la probabilidad de que ocurran 0, 1, 2 y 3 reclamaciones según la distribución de Poisson con el parámetro lambda, y multiplicamos por 100 para obtener el porcentaje
+dpois(0:3, lambda) * 100
+```
+
+As discussed in the introduction, it might be legitimate to assume that $\lambda$ depends on the insured, and that those $\lambda_i's$ are functions of some covariates. Thus, assume the $N_i \sim \mathcal P(\lambda_i)$ can equivalently be written $Y_i \sim \mathcal P(E_i * \lambda_i)$. With a logarithm link function, then $\lambda_i = e^{\mathbf X_{i} ^{'} \beta}$ , and $$Y_i \sim \mathcal P(e^{\mathbf X_{i}^{'} \beta + log \ E_i})$$
+
+Note:
+
+-   $e^{\mathbf X_{i}^{'} \beta + log \ E_i} = e^{\mathbf X_{i}^{'} \beta} * e^{log \ E_i} = e^{\mathbf X_{i}^{'} \beta} * E_i = \lambda_i * E_i$
+
+The exposure here is a particular variable in the regression. The logarithm of the exposure is indeed an explanatory variable, but no coefficient should be estimated (as it has to be equal to 1). This is the idea of the offset variable. Thus, to model the annualized claim frequency variable $N$, we run a regression on the observed number of claims $Y$, and the logarithm of the exposure appears as the offset variable. Assume that $\lambda_i = exp[\mathbf X_{i}^{'} \beta]$ (at least to ensure positivity of the parameter). Then, the log-likelihood is written as $$ log \ \mathcal L(\mathbf \beta; \mathbf Y, \mathbf E) = \sum_{i}^{n} [Y_i \ log(\lambda E_i) - [\lambda_iE_i] - log(Y_i!)]$$
+
+The gradient here is ($\lambda_i = exp[\mathbf X_{i}^{'} \beta]$), $$\nabla log \ \mathcal(\mathbf \beta, \mathbf Y, \mathbf E) = \frac{\partial \ log \ \mathcal L(\mathbf \beta;\mathbf Y)}{\partial \mathbf \beta} = \sum_{i=1}^{n} (Y_i - exp[\mathbf X_{i}^{'} \mathbf \beta + log(E_i)])\mathbf X_{i}^{'}$$
+
+while the Hessian matrix is $$H(\mathbf \beta) = \frac{\partial^2 log \ \mathcal(\mathbf \beta; \mathbf Y)}{\partial \mathbf \beta \partial \mathbf \beta^{'}} = - \sum (Y_i exp[\mathbf X_{i}^{'}+log(E_i)])\mathbf X_i \mathbf X_{i}^{'}$$
+
+Based on those quantities, it is possible to solve, numerically, the first-order condition, using Newton-Raphson's algorithm (also called Fisher Scoring).
+
+```{r}
+# Primer modelo -----------------------------------------------------------
+# Ajustamos un modelo de regresión lineal generalizada (GLM) para predecir el número de reclamaciones
+# La fórmula del modelo incluye las variables categóricas 'VehGas', 'AGEDRIVE' y 'DENSITY'
+# Además, se incluye una función de desplazamiento (offset) para la exposición
+# El modelo utiliza la familia Poisson, que es adecuada para datos de conteo (número de reclamaciones)
+reg = glm(ClaimNb ~ VehGas + AGEDRIVE + DENSITY + offset(Exposure),
+          family = poisson, data = CONTRACTS.f)
+
+# Mostramos un resumen del modelo ajustado, que incluye coeficientes, errores estándar, valores z y p-valores
+summary(reg)
+```
+
+We specify the distribution using $family = poisson(link = ''log'')$, while parameter $link = ''log''$ means that the logarithm of the expected values will be equal to the score, as $log(\lambda_i) = \mathbf X_{i}^{'}\beta$. This is the link function in GLM terminology. More generally, it is possible to consider another transformation $g$ such that $g(\lambda_i) = \mathbf X_i^{'}\beta$. In the context of a Poisson model, $g = log$ is the canonical link function.
+
+## Ratemaking with One Categorical Variable
+
+Consider here one regressor: the type of gas (either Diesel or Regular),
+
+```{r}
+# Asignamos la columna 'ClaimNb' de 'CONTRACTS.f' a la variable 'vY'
+vY <- CONTRACTS.f$ClaimNb
+# Asignamos la columna 'Exposure' de 'CONTRACTS.f' a la variable 'vE'
+vE <- CONTRACTS.f$Exposure
+# Asignamos la columna 'VehGas' de 'CONTRACTS.f' a la variable 'X1'
+X1 <- CONTRACTS.f$VehGas
+# Guardamos los niveles de la variable 'X1' en 'names1'
+names1 <- levels(X1)
+```
+
+```{r}
+# Calculamos la suma de 'vY' (número de reclamaciones) para cada nivel de 'X1' (tipo de combustible del vehículo)
+tapply(vY, X1, sum)
+# Calculamos la tasa de reclamaciones por exposición para cada nivel de 'X1'
+tapply(vY, X1, sum) / tapply(vE, X1, sum)
+```
+
+The Poisson regression without the (Intercept) variable is here
+
+```{r}
+# Creamos un dataframe 'df' con las variables 'vY', 'vE' y 'X1'
+df <- data.frame(vY, vE, X1)
+# Ajustamos un modelo de regresión de Poisson sin intercepto para predecir el número de reclamaciones
+# Utilizamos 'X1' como predictor y 'log(vE)' como offset
+regpoislog <- glm(vY ~ 0 + X1 + offset(log(vE)), 
+                  data = df, 
+                  family = poisson(link = "log"))
+# Mostramos un resumen del modelo ajustado, incluyendo coeficientes y estadísticas de ajuste
+summary(regpoislog)
+```
+
+The exponential of the coefficients are the observed annualized frequencies, per gas type
+
+```{r}
+# Calculamos los coeficientes del modelo en su forma exponencial
+exp(coefficients(regpoislog))
+# Creamos un nuevo dataframe 'newdf' con cada nivel de 'X1' y una exposición constante de 1
+newdf <- data.frame(X1 = names1, vE = rep(1, length(names1)))
+# Utilizamos el modelo ajustado para predecir el número de reclamaciones para el nuevo dataframe 'newdf'
+predict(regpoislog, newdata = newdf, type = "response")
+```
+
+With the (intercept), the regression is
+
+```{r}
+
+# Ajustamos un modelo de regresión de Poisson con intercepto para predecir el número de reclamaciones
+regpoislog <- glm(vY ~ X1 + offset(log(vE)), 
+                  data = df, 
+                  family = poisson(link = "log"))
+# Mostramos un resumen del modelo ajustado, incluyendo coeficientes y estadísticas de ajuste
+summary(regpoislog)
+```
+
+```{r}
+# Calculamos los coeficientes del modelo en su forma exponencial
+exp(coefficients(regpoislog))
+# Calculamos el producto de los coeficientes exponenciales del modelo ajustado
+prod(exp(coefficients(regpoislog)))
+```
+
+Here, claims frequency for Diesel carts is 0.07884, and for regular gas cars, it would be 87.35% of the value obtained for the reference one.
+
+## Contingency Tables and Minimal Bias Techniques
+
+It is natural to work with contingency matrices, with two regressors, for instance the GAS and the DENSITY.
+
+```{r}
+# Asignamos la columna 'DENSITY' de 'CONTRACTS.f' a la variable 'X2'
+X2 <- CONTRACTS.f$DENSITY
+# Guardamos los niveles de la variable 'X1' en 'names1'
+names1 <- levels(X1)
+# Guardamos los niveles de la variable 'X2' en 'names2'
+names2 <- levels(X2)
+# Creamos una tabla de contingencia de 'X1' y 'X2' y la asignamos a 'P'
+(P = table(X1, X2))
+```
+
+Define also the exposure matrix $\mathbf E = [E_{i,j}]$ and the claims count matrix $\mathbf Y$:
+
+```{r}
+# Creamos matrices 'E' y 'Y' con la misma estructura que 'P'
+E <- Y <- P
+# Iteramos sobre los niveles de 'X1'
+for (k in 1:length(names1)) {
+  # Calculamos la suma de las exposiciones 'vE' para cada combinación de 'X1' y 'X2', y asignamos a 'E'
+  E[k,] <- tapply(vE[X1 == names1[k]], X2[X1 == names1[k]], sum)
+  
+  # Calculamos la suma de las reclamaciones 'vY' para cada combinación de 'X1' y 'X2', y asignamos a 'Y'
+  Y[k,] <- tapply(vY[X1 == names1[k]], X2[X1 == names1[k]], sum)
+}
+```
+
+```{r}
+# Mostramos la matriz 'E' de exposiciones
+E
+```
+
+```{r}
+# Mostramos la matriz 'Y' de reclamaciones
+Y
+```
+
+The annualized (empirical) claims frequency is then
+
+```{r}
+# Calculamos la tasa de reclamaciones por exposición y la asignamos a 'N'
+(N = Y / E)
+```
+
+Let $\mathbf N$ denote the annualized frequency. Consider a multiplicative model for $\mathbf N$, in the sense that $N_{i,j} = L_i*C_j$ for some vector $\mathbf L = [L_i]$ and $\mathbf C = [C_j]$. Criteria to construct such vectors are usually on the following three: (weighted) least squares, minimization of some distance (e.g., chi-square), or minimal bias. For the least squares techniques, consider $(\mathbf L, \mathbf C)$ that solve $$min\{\sum_{i,j} E_{i,j} (N_{i,j} - L_i * C_j)^2\}$$
+
+while for the chi-square method, we have to solve $$min\{\sum_{i,j} E_{i,j} \frac{(N_{i,j} - L_i * C_j)^2}{L_i * C_j} \}$$
+
+Those two techniques cannot be solved analytically, and iterative algorithms should be used. Bailey (1963) assumed that predicted sums per row, and per column, should be equal to empirical ones. More precisely, if we sum per columns, for a given $j$, $$\sum_i Y_{i,j} = \sum_{i} E_{i,j} * N_{i,j} = \sum_i E_{i,j}*[L_i *C_j]$$
+
+and ig we sum per row, for a given $i$,$$\sum_j Y_{i,j} = \sum_{j} E_{i,j} * N_{i,j} = \sum_j E_{i,j}*[L_i *C_j]$$
+
+Again, these equation cannot be solved explicitly. Nevertheless, one can derive the following relationships: $$L_i = \frac{\sum_j Y_{i,j}}{\sum_j E_{i,j}*C_j}$$ $$C_j = \frac{\sum_i Y_{i,j}}{\sum_i E_{i,j}*L_i}$$
+
+An iterative algorithm can be used to solve those equations stating from some initial values for C.
+
+```{r}
+# Creamos una matriz 'L' de tamaño 100 x length(names1) con valores NA
+L <- matrix(NA, 100, length(names1))
+# Creamos una matriz 'C' de tamaño 100 x length(names2) con valores NA
+C <- matrix(NA, 100, length(names2))
+# Inicializamos la primera fila de 'C' con el valor de la tasa promedio de reclamaciones por exposición, repetido length(names2) veces
+C[1,] <- rep(sum(vY) / sum(vE), length(names2))
+# Asignamos los nombres de las columnas de 'C' a los niveles de 'X2'
+colnames(C) <- names2
+```
+
+```{r}
+# Iteramos 100 veces para actualizar las matrices 'L' y 'C'
+for(j in 2:100){
+  # Actualizamos los valores de la matriz 'L' para cada nivel de 'X1'
+  for(k in 1:length(names1)) {
+    L[j,k] <- sum(Y[k,]) / sum(E[k,] * C[j-1,])
+  }
+  # Actualizamos los valores de la matriz 'C' para cada nivel de 'X2'
+  for(k in 1:length(names2)) {
+    C[j,k] <- sum(Y[,k]) / sum(E[,k] * L[j,])
+  }
+}
+```
+
+After 100 loops, we obtain the following values for $\mathbf L$ and $\mathbf C$:
+
+```{r}
+# Mostramos la última fila de la matriz 'L'
+L[100,]
+```
+
+```{r}
+# Mostramos la última fila de la matriz 'C'
+C[100,]
+```
+
+That can be used to predict annualized claim frequency:
+
+```{r}
+# Creamos una copia de 'N' llamada 'PredN'
+PredN = N
+# Actualizamos 'PredN' utilizando los valores finales de 'L' y 'C'
+for(k in 1:length(names1)) {
+  PredN[k,] <- L[100,k] * C[100,]
+}
+# Mostramos la matriz 'PredN'
+PredN
+```
+
+Given the observed exposure, the prediction of number of claims for Diesel cars (for instance) with this model would be, which is exactly the same as the observed total.
+
+```{r}
+# Revisamos la predicción del número de relacamciones vs las reclamaciones observadas
+sum(PredN[1,]*E[1,])
+sum(Y[1,])
+```
+
+This is the minimal bias method, used in Bailey (1963) in motor insurance pricing. The interesting point is that this method coincides with the Poisson regression,
+
+```{r}
+
+# Creamos un dataframe 'df' con las variables 'vY', 'vE', 'X1' y 'X2'
+df <- data.frame(vY, vE, X1, X2)
+
+# Ajustamos un modelo de regresión de Poisson para predecir el número de reclamaciones 'vY'
+# utilizando 'X1' (tipo de combustible del vehículo) y 'X2' (densidad) como predictores
+regpoislog <- glm(vY ~ X1 + X2, data = df, family = poisson(link = "log"))
+
+# Mostramos un resumen del modelo ajustado, que incluye coeficientes y estadísticas de ajuste
+summary(regpoislog)
+
+# Calculamos los coeficientes del modelo en su forma exponencial
+exp(coefficients(regpoislog))
+```
+
+```{r}
+
+# Creamos un nuevo dataframe 'newdf' para realizar predicciones
+newdf <- data.frame(
+  X1 = factor(rep(names1, length(names2))),  # Repetimos los niveles de 'X1' para cada nivel de 'X2'
+  vE = rep(1, length(names1) * length(names2)),  # Asignamos una exposición constante de 1
+  X2 = factor(rep(names2, each = length(names1)))  # Repetimos cada nivel de 'X2' para todos los niveles de 'X1'
+)
+```
+
+```{r}
+# Realizamos predicciones utilizando el modelo ajustado y el nuevo dataframe 'newdf'
+# Convertimos las predicciones en una matriz con dimensiones length(names1) x length(names2)
+matrix(predict(regpoislog, newdata = newdf, type = "response"), length(names1), length(names2))
+```
+
+The interpretation will be that if we use a Poisson regression on categorical variables, the total prediction per modality will equal to the annualized empirical sum of claims.
+
+## Ratemaking with Continous Variables
+
+In Chapter 4, it was mentioned that working with continuous covariates might be interesting, because cutoff (to make variables categorical) levels might be too arbitrary. Thus, categorical variables constructed from continuous ones (ege of the driver, age of the car, spatial location, etc.) will create artificial discontinuities, which might be dangerous in the context of highly competitive markets.
+
+```{r}
+# Ajustamos un modelo de regresión lineal generalizada (GLM) para predecir el número de reclamaciones (ClaimNb)
+# La fórmula del modelo incluye la variable categórica 'AGEDRIVE' y una función de desplazamiento (offset) para la exposición (log(Exposure))
+# Utilizamos la familia Poisson, que es adecuada para datos de conteo (número de reclamaciones)
+reg.cut <- glm(ClaimNb ~ AGEDRIVE + offset(log(Exposure)),
+               family = poisson, 
+               data = CONTRACTS.f)
+
+# Mostramos un resumen del modelo ajustado, que incluye coeficientes, errores estándar, valores z y p-valores
+summary(reg.cut)
+```
+
+The standard regression on the age the driver would yield
+
+```{r}
+# Ajustamos un modelo de regresión lineal generalizada (GLM) para predecir el número de reclamaciones (ClaimNb)
+# La fórmula del modelo incluye la variable 'DrivAge' y una función de desplazamiento (offset) para la exposición (log(Exposure))
+# Utilizamos la familia Poisson, que es adecuada para datos de conteo (número de reclamaciones)
+reg.poisson <- glm(ClaimNb ~ DriverAge + offset(log(Exposure)),
+                   family = poisson, 
+                   data = CONTRACTS.f)
+
+# Mostramos un resumen del modelo ajustado, que incluye coeficientes, errores estándar, valores z y p-valores
+summary(reg.poisson)
+```
+
+But as in Chapter 4, assuming a linear relationship might be too restrictive.
+
+```{r}
+# Creamos un nuevo dataframe 'newdb' con edades de conductores desde 18 hasta 99 y una exposición constante de 1
+newdb <- data.frame(DriverAge = 18:99, Exposure = 1)
+
+# Utilizamos el modelo ajustado 'reg.poisson' para predecir la frecuencia anualizada de reclamaciones para las edades en 'newdb'
+# 'type = "response"' devuelve las predicciones en la escala de respuesta original, y 'se=TRUE' incluye los errores estándar de las predicciones
+pred.poisson <- predict(reg.poisson, newdata = newdb, type = "response", se = TRUE)
+
+# Graficamos las predicciones de frecuencia anualizada de reclamaciones contra la edad del conductor
+# 'type = "l"' crea un gráfico de líneas, 'xlab' y 'ylab' establecen las etiquetas de los ejes, 'ylim' define los límites del eje y, y 'col = "white"' establece el color de la línea a blanco (temporalmente invisible)
+plot(18:99, pred.poisson$fit, type = "l", xlab = "Age of the driver",
+     ylab = "Annualized Frequency", ylim = c(0, 0.3), col = "white")
+
+# Dibujamos segmentos de error alrededor de las predicciones
+# Las líneas grises representan los intervalos de confianza (predicción ± 2 errores estándar)
+segments(18:99, pred.poisson$fit - 2 * pred.poisson$se.fit, 
+         18:99, pred.poisson$fit + 2 * pred.poisson$se.fit,
+         col = "grey", lwd = 7)
+
+# Dibujamos las predicciones de frecuencia anualizada como una línea
+lines(18:99, pred.poisson$fit)
+
+# Añadimos una línea horizontal que representa la frecuencia promedio de reclamaciones anualizada en todo el conjunto de datos 'CONTRACTS.f'
+abline(h = sum(CONTRACTS.f$ClaimNb) / sum(CONTRACTS.f$Exposure), lty = 2)
+```
+
+```{r}
+# Ajustamos un modelo de regresión lineal generalizada (GLM) para predecir el número de reclamaciones (ClaimNb)
+# La fórmula del modelo incluye la variable categórica 'DrivAge' y una función de desplazamiento (offset) para la exposición (log(Exposure))
+# Utilizamos la familia Poisson, que es adecuada para datos de conteo (número de reclamaciones)
+reg.np <- glm(ClaimNb ~ as.factor(DriverAge) + offset(log(Exposure)), 
+              family = poisson, data = CONTRACTS.f)
+
+# Utilizamos el modelo ajustado 'reg.np' para predecir la frecuencia anualizada de reclamaciones para las edades en 'newdb'
+# 'type = "response"' devuelve las predicciones en la escala de respuesta original, y 'se=TRUE' incluye los errores estándar de las predicciones
+pred.poisson <- predict(reg.np, newdata = newdb, type = "response", se = TRUE)
+
+# Graficamos las predicciones de frecuencia anualizada de reclamaciones contra la edad del conductor
+# 'type = "l"' crea un gráfico de líneas, 'xlab' y 'ylab' establecen las etiquetas de los ejes, 'ylim' define los límites del eje y, y 'col = "white"' establece el color de la línea a blanco (temporalmente invisible)
+plot(18:99, pred.poisson$fit, type = "l", xlab = "Age of the driver",
+     ylab = "Annualized Frequency", ylim = c(0, 0.3), col = "white")
+
+# Dibujamos segmentos de error alrededor de las predicciones
+# Las líneas grises representan los intervalos de confianza (predicción ± 2 errores estándar)
+segments(18:99, pred.poisson$fit - 2 * pred.poisson$se.fit, 
+         18:99, pred.poisson$fit + 2 * pred.poisson$se.fit,
+         col = "grey", lwd = 7)
+
+# Dibujamos las predicciones de frecuencia anualizada como una línea
+lines(18:99, pred.poisson$fit)
+
+# Añadimos una línea horizontal que representa la frecuencia promedio de reclamaciones anualizada en todo el conjunto de datos 'CONTRACTS.f'
+abline(h = sum(CONTRACTS.f$ClaimNb) / sum(CONTRACTS.f$Exposure), lty = 2)
+```
+
+or to use spline regressions, so that we consider a linear model including $s(X)$ instead of $X$, where $s()$ will be estimated using penalized regression splines:
+
+```{r}
+# Cargamos la librería 'mgcv' que es necesaria para trabajar con modelos aditivos generalizados (GAM)
+library(mgcv)
+
+# Ajustamos un modelo aditivo generalizado (GAM) para predecir el número de reclamaciones (ClaimNb)
+# La fórmula del modelo incluye una función suavizada (spline) de 'DrivAge' y una función de desplazamiento (offset) para la exposición (log(Exposure))
+# Utilizamos la familia Poisson, que es adecuada para datos de conteo (número de reclamaciones)
+reg.splines <- gam(ClaimNb ~ s(DriverAge) + offset(log(Exposure)), 
+                   family = poisson, data = CONTRACTS.f)
+
+# Mostramos un resumen del modelo ajustado, que incluye información sobre los coeficientes, suavizados y estadísticas de ajuste
+summary(reg.splines)
+```
+
+```{r}
+# Utilizamos el modelo ajustado 'reg.splines' para predecir la frecuencia anualizada de reclamaciones para las edades en 'newdb'
+# 'type = "response"' devuelve las predicciones en la escala de respuesta original, y 'se=TRUE' incluye los errores estándar de las predicciones
+pred.poisson <- predict(reg.splines, newdata = newdb, type = "response", se = TRUE)
+
+# Graficamos las predicciones de frecuencia anualizada de reclamaciones contra la edad del conductor
+# 'type = "l"' crea un gráfico de líneas, 'xlab' y 'ylab' establecen las etiquetas de los ejes, 'ylim' define los límites del eje y, y 'col = "white"' establece el color de la línea a blanco (temporalmente invisible)
+plot(18:99, pred.poisson$fit, type = "l", xlab = "Age of the driver",
+     ylab = "Annualized Frequency", ylim = c(0, 0.3), col = "white")
+
+# Dibujamos segmentos de error alrededor de las predicciones
+# Las líneas grises representan los intervalos de confianza (predicción ± 2 errores estándar)
+segments(18:99, pred.poisson$fit - 2 * pred.poisson$se.fit, 
+         18:99, pred.poisson$fit + 2 * pred.poisson$se.fit,
+         col = "grey", lwd = 7)
+
+# Dibujamos las predicciones de frecuencia anualizada como una línea
+lines(18:99, pred.poisson$fit)
+
+# Añadimos una línea horizontal que representa la frecuencia promedio de reclamaciones anualizada en todo el conjunto de datos 'CONTRACTS.f'
+abline(h = sum(CONTRACTS.f$ClaimNb) / sum(CONTRACTS.f$Exposure), lty = 2)
+```
+
+## A Poisson Regression to Model Yearly Claim Frequency
+
+In order to have significant factors, the age of the car is here only in two classes: less than 15 years old, and more than 15 years old:
+
+```{r}
+# Creamos una nueva columna 'AGECAR' en el dataframe 'CONTRACTS.f' 
+# utilizando la columna 'CarAge' de 'dat'
+# La función 'cut' categoriza 'CarAge' en dos rangos: de 0 a 15 años, y mayores de 15 años
+# 'include.lowest = TRUE' asegura que el valor más bajo (0) se incluya en el primer rango
+CONTRACTS.f$AGECAR <- cut(dat$CarAge, c(0, 15, Inf), include.lowest = TRUE)
+
+# Mostramos los niveles de la nueva columna 'AGECAR' para verificar las categorías creadas
+levels(CONTRACTS.f$AGECAR)
+```
+
+For the brand, we only distinguish cars of brand F,
+
+```{r}
+# Creamos una nueva columna 'brandF' en el dataframe 'CONTRACTS.f'
+# La nueva columna 'brandF' es un factor basado en si el valor en la columna 'BRAND' es igual a "F"
+# 'CONTRACTS.f$BRAND == "F"' devuelve TRUE si 'BRAND' es "F" y FALSE en caso contrario
+# 'labels = c("other", "F")' asigna la etiqueta "other" a los valores FALSE y "F" a los valores TRUE
+CONTRACTS.f$brandF <- factor(CONTRACTS.f$BRAND == "F", labels = c("other", "F"))
+```
+
+and for the power of the car, three classes are considered here,
+
+```{r}
+# Creamos una nueva columna 'powerF' en el dataframe 'CONTRACTS.f'
+# La nueva columna 'powerF' es un factor basado en la variable 'Power'
+# 'CONTRACTS.f$Power %in% letters[4:6]' devuelve TRUE si 'Power' está en las letras 'd', 'e' o 'f'
+# 'CONTRACTS.f$Power %in% letters[7:8]' devuelve TRUE si 'Power' está en las letras 'g' o 'h'
+# Multiplicamos por 1 y 2 para crear un valor numérico que se convertirá en un factor
+# 'labels = c("other", "DEF", "GH")' asigna las etiquetas "other", "DEF" y "GH" a los valores 0, 1 y 2 respectivamente
+CONTRACTS.f$powerF <- factor(1 * (CONTRACTS.f$Power %in% letters[4:6]) + 2 * (CONTRACTS.f$Power %in% letters[7:8]),
+                             labels = c("other", "DEF", "GH"))
+```
+
+Out model here is
+
+```{r}
+# Definimos la fórmula del modelo de regresión para predecir el número de reclamaciones (ClaimNb)
+# La fórmula incluye las variables 'AGEDRIVE', 'AGECAR', 'DENSITY', 'brandF', 'powerF', 'Gas'
+# También incluye una función de desplazamiento (offset) para la exposición (log(Exposure))
+freg <- formula(ClaimNb ~ AGEDRIVE + AGECAR + DENSITY + brandF + powerF + Gas + offset(log(Exposure)))
+
+# Ajustamos un modelo de regresión lineal generalizada (GLM) utilizando la fórmula definida
+# El modelo utiliza la familia Poisson, que es adecuada para datos de conteo (número de reclamaciones)
+# y utiliza un enlace logarítmico
+regp <- glm(freg, data = CONTRACTS.f, family = poisson(link = "log"))
+
+# Mostramos un resumen del modelo ajustado, que incluye coeficientes, errores estándar, valores z y p-valores
+summary(regp)
+```
+
+```{r}
+
+```
+
+## From Poisson to Quasi-Poisson
+
+The Poisson assumption is stronger than necessary when we use the first-order condition $$\mathbb E[(Y_i - exp(\mathbf X_{i}^{'} \mathbf \beta))*\mathbf X_i]=\mathbf 0$$
+
+which can be rewritten as $$\sum_{i=1}^{n} \frac{Y_i - \mu_i}{g^{'}(\mu_i)*var[Y_i]} * \mathbf X_i = \mathbf 0$$
+
+In this case, various forms of $g(\mu_i)$ (the link function) generate convergent estimators $\mathbf \beta$. Other forms of $var[Y_i]$ can also be chosen. In such a case, we can show that $\hat \beta_{PMLE}$ estimators have the following distributions: $$\hat \beta_{PMLE} \rightarrow \mathcal N(\beta, var_{PMLE}[\hat \beta])$$
+
+with $$var_{PMLE}[\hat \beta] = [\sum_{i=1}^{n} \mu_i \mathbf X_{i} \mathbf X_{i}^{'}]^{-1}[\sum_{i=1}^{n} \omega_i \mathbf X_i \mathbf X_{i}^{'}][\sum_{i=1}^{n} \mu_i \mathbf X_i \mathbf X_{i}^{'}]^{-1}$$
+
+and $\omega_i = var[Y_i|\mathbf X_i]$.
+
+Obviously, if we suppose $\omega_i = \mu_i$, we obtain the general first-order condition for a Poisson distribution: $$var_{PMLE}[\hat \beta] = [\sum_{i=1}^{n} \mu_i \mathbf X_i \mathbf X_{i}^{'}]^{-1} = var_{MLE}[\hat \beta]$$
+
+However, other forms of $\omega_i$ can be explored.
+
+## NB1 Variance Form: Negative Binomial Type I
+
+If we suppose an NB1 variance form, such as $\omega_i = \varphi \mu_i$, we have $$var_{NB1}[\hat \beta] = \varphi[\sum_{i=1}^{n} \mu_i \mathbf X_i \mathbf X_{i}{'}]^{-1} = \varphi var_{MLE}[\hat \beta]$$
+
+Consequently, a simple way to generalize the variance form is to use the MLE of a Poisson distribution and multiply the variance of $\hat \beta$ by an estimator of $\phi$. A natural estimator of $\phi$ es $$\hat \varphi = \frac{1}{n-k} \sum_{i=1}^{n} \frac{(y_u - \hat \mu _i)^2}{\hat \mu_i}$$
+
+but nonconstant exposition parameter $E_i$ causes bias in the estimation. Instead, we should use $$\hat \varphi = \frac{\sum_{i=1}^{n} (y_i - \hat \mu_i)^2}{\sum_{i=1}^{n} \hat \mu_i}$$
+
+## NB2 Variance Form: Negative Binomial Type II
+
+If we suppose an NB2 variance form such as $\omega_i = \mu_i = \mu_i + \alpha*\mu_{i}^{2}$ , we have
+
+$$var_{NB2}[\hat \beta] = [\sum_{i=1}^{n} \mu_i \mathbf X_{i} \mathbf X_{i}^{'}]^{-1}[\sum_{i=1}^{n} (\mu_i + \alpha \mu_{i}^{2}) \mathbf X_i \mathbf X_{i}^{'}][\sum_{i=1}^{n} \mu_i \mathbf X_i \mathbf X_{i}^{'}]^{-1}$$
+
+As with the NB1 estimator of overdispersion, the classic estimator of $\alpha$ is $$\hat \alpha = \frac{1}{n-k} \sum_{i=1}^{n} \frac{(Y_i - \hat \mu_i)^2 - \hat \mu_i}{\hat \mu_{i}^{2}}$$
+
+but is unappropiate for non-constant $E_i$. The following estimator is preferred: $$\alpha = \frac{\sum_{i=1}^{n} (Y_i - \hat \mu_i)^2 -\hat \mu_i}{\sum_{i=1}^{n} \hat \mu_{i=1}^{n}}$$
+
+The NB2 regression is obtained using glm.nb of library MASS:
+
+```{r}
+# Cargamos la librería 'MASS' que contiene funciones para el modelado de datos, incluyendo el modelo binomial negativo
+library(MASS)
+
+# Ajustamos un modelo binomial negativo (NB2) utilizando la fórmula 'freg' y el dataframe 'CONTRACTS.f'
+regnb2 <- glm.nb(freg, data = CONTRACTS.f)
+
+# Mostramos un resumen del modelo ajustado, que incluye información sobre los coeficientes, errores estándar, valores z y p-valores
+summary(regnb2)
+```
+
+## Unstructured Variance Form
+
+More generally, we can estimate the variance $\beta$ without supposing a specific form of $\omega_i$. In this case, the unstructured variance form of $\hat \beta$ is $$var_{RS}[\hat \beta] = [\sum_{i=1}^{n}\mu_i \mathbf X_i \mathbf X_{i}^{'}]^{-1}[\sum_{i=1}^{n} (Y_i - \mu_i)^2 \mathbf X_i \mathbf X_{i}^{'}][\sum_{i=1}^{n} \mu_i \mathbf X_i \mathbf X_{i}^{'}]$$
+
+evaluated at $\hat \mu_i$.
+
+## Nonparametric Variance Form
+
+A nonparametric way to estimate $\omega_i$ is to use the approach of Delgado & Kniesner (1997). They do not suppose a specific form for the conditional variance $\sigma_i^2$ of the i-th contract, and estimate it using a consistent estimator of $\beta, \hat \beta,$ such as the one obtained by a Poisson regression: $$\hat \omega_i \sum_{j=1, j \not= i} [n_i - \hat \mu_i ]^2 w_{i,}$$
+
+where $w_{i,j}$ can be seen as weight applied to the j-th observation to compute the variance of the i-th insured with, obviously, $\sum_{j=1, j \not= i} w_{i,j} = 1$. Using $w_{i,j} = \frac{1}{n-1}$ leads to an estimated variance almost equal to the empirical variance. Delgado & Kniesner (1997) evaluated the $w_{i,j}$ using nonparametric k nearest neighbors, evaluated by its proximity in its normalized covariates. The $k$ nearest neighbors were selected using a neighbor specification $k$ that is proportional to the number of observations, such as $n^{1/2}$ or $n^{3/5}$ .
+
+Instead of using the nearest neighbors estimation that gives the same weight on all $k$ observations (which can lead to situation where the $\hat \sigma_i^2$ would be estimated using only insureds having the same profiles, while other $\hat \sigma_i^2$ would be estimated using other insured's profiles), we can rather use kernel estimation which seems to offer a better smooth.
+
+## More Advanced Models for Counts
+
+A popular way to generalize count distributions is to use a compound sum of the following form: $$ Y = \sum_{j=1}^{M} Z_j$$
+
+With specific choices of distribution $M$ and $Z$, we obtain the following distributions:
+
+-   If $M \sim \mathcal P(\mu)$, and $Z \sim Logarithmic(\eta)$, we have a negative binomial distribution.
+
+-   If $M \sim \mathcal B(\phi)$, and $Z \sim mathcal P(\lambda)$ (or negative binomial), we have a Zero-inflated Poisson (or Zero-inflated negative binomial) distribution.
+
+-   If $M \sim \mathcal B(\phi)$, and $Z \sim truncated \mathcal \ P(\lambda)$, (or negative binomial), meaning that $X_i \in {1,2,...}$, we have a Hurdle Poisson (or Hurdle negative binomial) distribution.
+
+Note that instead of using a truncated at zero distribution, we can also use a shigted at zero distribution.
+
+## Negative Binomial Regression
+
+In Chapters 2 and 3, it was mentioned that if $Y|\Theta \sim \mathcal P(\lambda * \theta)$, where $\Theta$ has a Gamma distribution, with identical parameters $\alpha$ (so that $\mathbb E(\Theta) = 1$, then $Y$ has a negative binomial distribution: $$\mathbb P(Y = y) = \frac{\Gamma(y+\alpha^{-1})}{\Gamma(y+1)\Gamma(\alpha^{-1})}(\frac{1}{1+\frac{\lambda}{\alpha}})^{\alpha^{-1}}(1-\frac{1}{1+\frac{\lambda}{\alpha}})^{y} \ , \forall y \in \mathbb N$$
+
+Let $r = \alpha^{-1}$ and $p=(1+\alpha \lambda)^{-1}$; $$f(y) = \mathbb P(Y = y) = { y \choose y+r-1} p^r [1-p]^y \ , \forall y \in \mathbb N$$
+
+which can be written $$f(y) = exp[y \ log(1-p) + r \ log(p) + log({y \choose y+r-1})] \ , \forall y \in \mathbb N $$
+
+which is a distribution of the exponential family when $\theta = log[1-p] \ , b(\theta) = -r \ log(p)$ and $a(\varphi) =1$, with a know $r$. The mean of $Y$ is here $$\mathbb E(Y) = b^{'}(\theta) = \frac{\partial b}{\partial p} \frac{\partial p}{\partial \theta} = \frac{r(1-p)}{p} = \lambda$$
+
+while its variance is $$var(Y) = b^{''}( \theta) = \frac{\partial ^{2} b}{\partial p^{2}} (\frac{\partial p}{\partial \theta})^2 + \frac{\partial b}{\partial p}\frac{\partial^2 p}{\partial \theta^2} = \frac{r(1-p)}{p^2}$$
+
+which can also be written as $$var(Y) = \frac{1}{p} \mathbb E(Y) = [1+\alpha*\lambda]*\lambda $$
+
+This is so-called Type 2 Negative Binomial regression (NB2, as in Hilbe (2011)): $$\mathbb E(Y) = \lambda = \mu \ and \ var(Y) = \lambda + \alpha \lambda^2 $$
+
+The canonical link, such that $g(\lambda) = \theta$, is $g(\mu) = log(\alpha \mu) - log(1+\alpha \mu)$. The generic function in R for an NB2 regression is
+
+> library(MASS)
+>
+> glm.nb(Y \~ X1+X2+X3+offset(log(E)))
+
+(neither the family nor the link function is specified here). In that case, $\alpha$ is unknown and will be obtained using
+
+> summary()
+
+In the case where $\alpha$ is know, it is possible to use
+
+> family = negative.binomiale
+
+in the standard glm function. For instance, a geometric regression will be obtained using
+
+> glm(Y \~ X1+X2+X3+offset(log(E)), family = negative.binomiale(1))
+
+In that case, $var(Y) = \lambda + \lambda^2$.
+
+Using the context of NB2 regression, it is possible to test if the Poisson regression is a suitable model, the alternative being an NB2 model, with $\alpha$ significant. We must be careful with test when the null hypothesis is on the boundary of the parameter space. Indeed, in such situations, the MLE are no longer asymptotically normal under $H_0$. The asymptotic properties of the score test, and also called the Lagrange multiplier test, as shown by Moran (1971) and Chant (1974), are not altered when testing on the boundary of the parameter space.
+
+Using the score test, we assume here that $$var(Y|\mathbf{X=x} = \mathbb E(Y|\mathbf{X=x) + \alpha *\mathbb E(Y|\mathbf{X=x})^2}$$
+
+and we would like to test $$H_0: \alpha = 0 \ against \ H_1: \alpha > 0$$
+
+A standard statistic is $$T = \frac{\sum_{i=1}^{n} [(Y_i - \hat \mu _i)^2 - Y_i]}{\sqrt{2 \sum_{i=1}^{n} \hat \mu_i^{2}}}$$
+
+which has a centered Gaussian distribution, with unit variance, under $H_0$. This test has been implemented in R the AER library,
+
+```{r include=FALSE}
+library(AER)
+```
+
+```{r}
+# Test de dispersion
+dispersiontest(regp)
+```
+
+This kind of binomial distribution has also been proposed with another for parametrization. Using Equation (14.2), the parameter $\eta_i$ of the logarithmic distribution has been used as $$exp(\mathbf X_i^{'}\gamma) = \frac{\eta_i}{1-\eta_i}$$
+
+while $M \sim \mathcal P(exp(\mathbf X_i^{'} \beta))$.
+
+Consequently, $N_i$ is binomial negative with parameters $\frac{\lambda_i}{log(1+exp(x_i^{'}\gamma))}$ and $exp(x_i^{'}\gamma)$, with a probability function defined as $$\mathbb P(N_i = k| \mathbf{X_i = x_i}) = \frac{\Gamma(k + \frac{\lambda_i}{log(1+exp(x_i^{'}\gamma)})exp(-\lambda_i)}{\Gamma(k+1)\Gamma(\frac{\lambda_i}{log(1+exp(x_i^{'}\gamma))})(1+exp(-x_i^{'}\gamma))^k}$$
+
+The first two moments of those models are $$\mathbb E[N_i = k|\mathbf{X=x}] = \frac{exp(x_i^{'}\beta + x_i{'}\gamma)}{log(1+exp(x_i^{'}\gamma)}$$
+
+$$var[N_i|\mathbf{X = x}] = (1 + exp(x_{i}^{'}\gamma))\mathbb E[N_i]$$
+
+## Zero-Inflated Models
+
+A model is said to be zero-inflated if it can be written as a mixture, with probability $\pi_i$ a Dirac distribution on 0 and a standard counting regression model (Poisson or Negative Binomial): $$ \mathbb P(N_i = k) = \pi_i+[1-\pi_i]*p_i(0) \ if \ k = 0$$
+
+or $$ \mathbb P(N_i = k) = [1-\pi_i] * \frac{p_i(k)}{1-p_i(0)} \ if \ k = 1,2,... $$
+
+which can be used with function ZENBI of library gamlss.
+
+If we suppose that $p_i \geq 0$, testing $p_i = 0$ is also a test with the null hypothesis on the boundary of the parameter space. Consequently, using a score test is recommended. Vean den Broek (1995) use this test and show that the test statistic of a zero-inflated Poisson against a Poisson distribution can be expressed as $$LM = \frac{\sum_{i=1}^{n} \frac{(\textbf 1 (N_i = 0))-e^{-\hat \lambda_i}}{e^{-\hat \lambda_i}}}{\sqrt{\sum_{i=1}^{n} \frac{(1-e^{-\hat \lambda_i})}{e^{-\hat \lambda_i}}-\sum_{i=1}^{n} N_i}}$$
+
+Under the null hypotesis, this statistic will have an asymptotic $\mathcal N(0,1)$ distribution. Construction of the LM test for heterogeneous models against their zero-inflated modification van be done the same way.
+
+Zero-inflated and zero-adapted models can be estimated either using functions ZIP (zero-inflated Poisson) or ZIBI (zero-adapted Negative Binomial) from library gamlss, or functions of library pscl. For instance, for a zero-inflated model, where probability $\pi_i$ is function of covariates $\mathbf X_2$ (with a logistic transformation), while $\lambda_i$ is function of covariates $\mathbf X_1$, the generic code will be
+
+> reg \<- zeroinfl(NB \~ X1 \| X2, data = CONTRACTS.f, dist = "poisson", link = "logit")
+
+If we consider a zero-inflated Poisson model, with constant probability $\pi_i$, we obtain
+
+```{r include=FALSE}
+library(gamlss)
+library(pscl)
+```
+
+```{r}
+# Definir la fórmula para el modelo de inflación cero (Zero-Inflated Model)
+# La parte a la izquierda de la barra "|" define el modelo de conteo y la parte derecha define el modelo de ceros.
+fregzi <- formula(ClaimNb ~ AGEDRIVE + AGECAR + DENSITY + brandF + powerF + Gas + offset(log(Exposure)) | 1)
+
+# Ajustar un modelo de inflación cero usando la fórmula definida anteriormente
+# Utilizando una distribución Poisson para el modelo de conteo y un enlace logit para el modelo de ceros
+regzip <- zeroinfl(fregzi, data = CONTRACTS.f, dist = "poisson", link = "logit")
+
+# Mostrar el resumen del modelo ajustado
+summary(regzip)
+```
+
+If we consider a probability $\pi_i$ function of the age of the driver, we obtain
+
+```{r}
+# Definir la fórmula para el modelo de inflación cero (Zero-Inflated Model)
+# La parte a la izquierda de la barra "|" define el modelo de conteo y la parte derecha define el modelo de ceros.
+# En este caso, 'AGEDRIVE' también se utiliza en el modelo de ceros.
+fregzi <- formula(ClaimNb ~ AGEDRIVE + AGECAR + DENSITY + brandF + powerF + Gas + offset(log(Exposure)) | AGEDRIVE)
+
+# Ajustar un modelo de inflación cero usando la fórmula definida anteriormente
+# Utilizando una distribución Poisson para el modelo de conteo y un enlace logit para el modelo de ceros
+regzip <- zeroinfl(fregzi, data = CONTRACTS.f, dist = "poisson", link = "logit")
+
+# Mostrar el resumen del modelo ajustado
+summary(regzip)
+```
+
+## Hurdle Models
+
+The Hurdle distribution is based on a dichotomic process, where insureds that report are considered completely different from those who report at least once. For some specific probability mass functions $p_{i}^{(1)}(.)$ a,d $p_{i}^{(2)}(.)$, the probability function of the hurdle is expressed as
+
+$$
+\mathbb{P}(N_i = k) = \begin{cases} p_i^{(1)}(0) & \text{if } k = 0 \\\frac{1 - p_i^{(1)}(0)}{1 - p_i^{(2)}(0)} p_i^{(2)}(k) & \text{if } k = 1, 2, \ldots \end{cases}
+$$
+
+The model collapses to $p_i(.)$ when $p_{i}^{(1)}(.) = p_{i}^{(2)}(.) = p_i(.)$, which can be used as a basis for specification test. The mean and variance corresponding to the model described above are given by
+
+$$\mathbb E[N_i] = \frac{1-p_{i}^{(1)}(0)}{1-p_{i}^{(2)}(0)}\mu_2$$
+
+$$var[N_i] = \mathbb P(N_i > 0)var[N_i|N_i >0] + P(N_i = 0)E[N_i | N_i >0]$$
+
+where $\mu_2$ is the expected value associated with the probability mass function $p_{i}^{(2)}(.)$.
+
+An advantage of the model is its property to have a separable log-likelihood:
+
+$$\log \mathcal{L} = \sum_{i=1}^{n} \left[ 1(N_i = 0) \log(p_i^{(1)}(0)) + 1(N_i > 0) \log(1 - p_i^{(1)}(0)) \right] + \sum_{i=1}^{n} 1(N_i > 0) \log \left( \frac{p_i^{(2)}(N_i)}{1 - p_i^{(2)}(0)} \right)$$
+
+Then, as done with the number of claims and the cost of the claims, the maximization of the log-likelihood can be done separately for each part (zero case and positive values). These models can be implemented using the hurdle function, from the pscl library. If we consider a (truncated) negative binomial distribution for $p^{(2)}$ and a binomial distribution for $p^{(1)}$, on covariates $\mathbf X_2$ and $\mathbf X_1$ respectively, the generic code will be
+
+> hurdle(NB \~ X1\|X2, data =CONTRACTS.f, dist = "poisson", zero.dist = "binomial")
+
+Here, we obtain
+
+```{r}
+# Definir la fórmula para el modelo hurdle
+# La parte a la izquierda de la barra "|" define el modelo de conteo y la parte derecha define el modelo de ceros.
+# En este caso, 'AGEDRIVE' también se utiliza en el modelo de ceros.
+freghrd <- formula(ClaimNb ~ AGEDRIVE + AGECAR + DENSITY + brandF + powerF + Gas + offset(log(Exposure)) | AGEDRIVE)
+
+# Ajustar un modelo hurdle usando la fórmula definida anteriormente
+# Utilizando una distribución binomial negativa para el modelo de conteo y un modelo binomial con enlace logit para el modelo de ceros
+reghrd <- hurdle(freghrd, data = CONTRACTS.f, dist = "negbin", zero.dist = "binomial", link = "logit")
+
+# Mostrar el resumen del modelo ajustado
+summary(reghrd)
+```
+
+# Individual Claims, Gamma, Log-Normal, and Other Regressions
+
+In the introduction, we ha seen that the pure premium associated to an insured with characteristics $\mathbf x$ should be $\pi(\mathbf x) = \mathbb E(N|\mathbf{X=x})*\mathbb P(Y|\mathbf{X=x})$. The first part has been detailed in the previous sections, and now it might be time to propose some models for individual claims losses $\mathbb E(Y|\mathbf{X = x})$. This section is usually described briefly in actuarial literature, because the tools are the same as before (Generalized Lineal Models); so for statistical reasons, the is no reason to spend too much time here. But also because, in practice, covariates are much less informative to predict amounts than to predict frequency.
+
+The dataset contains a claims ID (which is a contract number) and an indemnity amount (previously, the datasets were merged)
+
+```{r}
+# Fusionar los dataframes 'freMTPLsev' y 'freMTPLfreq' en un nuevo dataframe llamado 'claims'
+claims <- merge(freMTPLsev, freMTPLfreq)
+
+# Fusionar los dataframes 'freMTPLsev' y 'CONTRACTS.f' en un nuevo dataframe llamado 'claims.f'
+claims.f <- merge(freMTPLsev, CONTRACTS.f)
+```
+
+Note that this dataset contains only claims with a strictly positive indemnity (losses claims but field away are not in this dataset). Thus, what we need to models losses is a distribution on $\mathbb R_+$.
+
+## Gamma Regression
+
+$Y$ has a Gamma distribution if tis density can be written
+
+$$
+f(y) = \frac{1}{y\Gamma(\varphi^{-1})}(\frac{y}{\mu\varphi})^{\varphi^{-1}}exp(-\frac{y}{\mu\varphi}) \ , \ \forall y \in \mathbb R_{+}
+$$
+
+This distribution is in the exponential familiy, as
+
+$$
+f(y) = exp[\frac{\frac{y}{\mu} - (-log(\mu))}{-\varphi} + \frac{1-\varphi}{\varphi}log(y) - \frac{log(\varphi)}{\varphi} - log(\Gamma(\varphi^{-1}))]
+$$
+
+The canonial link here is $\theta = \mu^{-1}$, and $b(\theta) = - log(\mu)$, so that the variance function will be $V(\mu)=\mu^2$. Observe, further, that $var(Y) = \varphi \mathbb E(Y)^2$, and this the coefficient of variation is constant; here,
+
+$$
+\frac{\sqrt{var(Y)}}{\mathbb E(Y)} = \varphi
+$$
+
+## The Log-Normal Model
+
+$Y$ has a log-normal distribution if its density can be written
+
+$$
+f(y) = \frac{1}{y\sqrt{2\pi\sigma^2}}e^{-\frac{(ln(y-\mu))^2}{2\sigma^2}}
+$$
+
+which is not in the exponential familiy (so Generalized Linear Models cannot be used to model $Y$). Nevertheless, recall that $Y$ has a log-normal distribution if $log(Y)$ has a Gaussian distribution (which is in the exponential family).
+
+-   **Remark**: IF $Y$ has a log-normal distribution with parameters $\mu$ and $\sigma^2$ , then $Y=exp[Y^*]$ , where $Y^* \sim \mathcal N(\mu, \sigma^2)$. Thus, $\mu$ is not the averague of $Y$, and neither is $exp[\mu]$. In fact,
+
+$$
+\mathbb E(Y) = \mathbb E(exp[Y^*]) \not = exp[\mathbb E(Y^*)] = exp(\mu)
+$$
+
+from Jensen inequality. One can easily prove that
+
+$$
+\mathbb E = e^{\mu + \frac{\sigma^2}{2}} = e^{\frac{\sigma^2}{2}}*exp[\mathbb E(Y^*)] \ and \ var(Y) = (e^{\sigma^2} -1)e^{2\mu + \sigma^2}
+$$
+
+## Gamma versus Log-Normal Models
+
+Consider a Gamma regression for $Y_i$. Using Taylor's expansion (of order 2),
+
+$$
+log(Y_i) \sim log(\mu_i) + \frac{1}{\mu_i}[Y_i - \mu_i] - \frac{1}{2\mu_i^{2}}[Y_i - \mu_i]^2
+$$
+
+if $\varphi$ is small. Then, if we take the expected value, it comes that
+
+$$
+\mathbb E(log Y_i) \sim log(\mu_i) - \frac{1}{2}\varphi
+$$
+
+Further, one can also prove that $var(log(Y_i) \sim \varphi$. If we consider a logarithm link function, so that $Y_i$ has variance $\varphi\mu_i$ where $\mu_i = exp[\mathbf X_i^{'} \beta]$ ,then
+
+$$
+\mathbb E(log(Y_i)) \sim \mathbf{X_i^{'}\beta} - \frac{1}{2}\varphi \ and \ var(log(Y_i)) \sim \varphi
+$$
+
+Consider now a log-normal regression, $log(Y_i) = \mathbf{X_i^{'}\alpha}+\epsilon_i$, where $\epsilon_i \sim \mathcal N(0,\sigma^2)$ i.i.d. Then
+
+$$
+\mathbb E(log(Y_i)) \sim \mathbf{X_i^{'}\alpha} \ and \ var(log(Y_i)) = \sigma^2
+$$
+
+Except for the intercept, coefficients $\mathbf\alpha$ and $\mathbf \beta$ should be rather close if the coefficient of variation is small
+
+```{r}
+# Ajustar un modelo de regresión lineal utilizando la transformación logarítmica de 'ClaimAmount'
+# como variable dependiente y 'AGECAR' y 'Gas' como variables independientes.
+# El ajuste se realiza utilizando los datos del dataframe 'claims.f' donde 'ClaimAmount' es menor a 15000.
+reg.logn <- lm(log(ClaimAmount) ~ AGECAR + Gas, data = claims.f[claims.f$ClaimAmount < 15000, ])
+
+# Mostrar el resumen del modelo ajustado
+summary(reg.logn)
+```
+
+```{r}
+# Ajustar un modelo de regresión generalizada (GLM) utilizando 'ClaimAmount' como variable dependiente
+# y 'AGECAR' y 'Gas' como variables independientes. El modelo utiliza una familia Gamma con un enlace logarítmico.
+# El ajuste se realiza utilizando los datos del dataframe 'claims.f' donde 'ClaimAmount' es menor a 15000.
+reg.gamma <- glm(ClaimAmount ~ AGECAR + Gas, family = Gamma(link = "log"), data = claims.f[claims.f$ClaimAmount < 15000, ])
+
+# Mostrar el resumen del modelo ajustado
+summary(reg.gamma)
+```
+
+## Inverse Gaussin Model
+
+$Y$ has an inverse Gaussian distribution if its density can be written
+
+$$
+f(y) = [\frac{\lambda}{2\pi y^3}]^{\frac{1}{2}} exp(\frac{-\lambda (y-\mu)^2}{2\mu^2 y}) \ , \ \forall y \in \mathbb R_+ 
+$$
+
+with expected values $\mu$.
+
+# Large Claims and Ratemaking
+
+If claims are not too large, then the log-normal and the gamma regressions should be quite close, as mentioned in the section above. But consider the following two regression, on the age of the driver (as a continuous variate):
+
+```{r}
+# Ajustar un modelo de regresión lineal utilizando la transformación logarítmica de 'ClaimAmount'
+# como variable dependiente y 'DriverAge' como variable independiente.
+# El ajuste se realiza utilizando los datos del dataframe 'claims'.
+reg.logn <- lm(log(ClaimAmount) ~ DriverAge, data = claims)
+
+# Mostrar el resumen del modelo ajustado
+summary(reg.logn)
+```
+
+```{r}
+# Ajustar un modelo de regresión generalizada (GLM) utilizando 'ClaimAmount' como variable dependiente
+# y 'DriverAge' como variable independiente. El modelo utiliza una familia Gamma con un enlace logarítmico.
+# El ajuste se realiza utilizando los datos del dataframe 'claims'.
+reg.gamma <- glm(ClaimAmount ~ DriverAge, family = Gamma(link = "log"), data = claims)
+
+# Mostrar el resumen del modelo ajustado
+summary(reg.gamma)
+```
+
+Here, coefficients are significant, but with the opposite signs. With a Gamma regression, the younger the driver, the less expensive the claims, while it is reverse with a log-normal regression. The interpretation is related to large claims: outliers will affect the Gamma regression more than the log-normal one (because it is a regression on the logarithm of the losses). On the other hand, on average, predictions obtained with a log-normal model may not be consistent with observed losses: here, the average cost of the claim was
+
+```{r}
+# PRomedio de las reclamaciones
+mean(claims$ClaimAmount)
+```
+
+and the average predictions were, with the two models,
+
+```{r}
+# Promedio predicciones modelo gamma
+mean(predict(reg.gamma, type = "response"))
+```
+
+```{r}
+# Promedio predicciones modelo log normal
+sigma <- summary(reg.logn)$sigma
+mean(exp(predict(reg.logn))*exp(sigma^2/2))
+```
+
+So, in order to have a more robust pricing method, we should find a way to deal with large claims. A natural technique is to consider that differentiating premiums should be valid for standard claims, while extremely large one might be spread between all the insureds, without differentiating (pooling extremely large losse among the insureds).
+
+```{r}
+# Ordenar el dataframe 'claims' en orden descendente basado en la columna 'ClaimAmount'
+# y seleccionar las columnas especificadas.
+M <- claims[order(-claims$ClaimAmount), c("ClaimAmount", "ClaimNb", "Power", "CarAge", "DriverAge", "Density")]
+
+# Calcular la suma acumulada de 'ClaimAmount' como un porcentaje del total de 'ClaimAmount'
+M$SUM <- cumsum(M$ClaimAmount) / sum(M$ClaimAmount) * 100
+
+# Mostrar las primeras filas del dataframe resultante
+head(M)
+```
+
+The largest claim cost more than 2 millions euros, almost 6% of the total loss. The three largest (almost 11% of the total loss) were caused by young drivers (19,20, and 21 years old, respectively).
+
+# Model with Two Kinds of Claims
+
+A standard result in probability theory is that $\mathbb E(Y) = \mathbb E( \mathbb E (Y|Z))$ for any Z. Thus, given a multinomial random variable $Z$, taking values $z_i's$,
+
+$$
+\mathbb E(Y) = \sum_i \mathbb E(Y|Z = Z_i)*\mathbb P(Z=z_i)
+$$
+
+on any probabilistic space. Thus, we can consider any conditional expectation
+
+$$
+\mathbb E(Y|\mathbf X) = \sum_i \mathbb E(Y|Z=<_1, \mathbf X)*\mathbb P(Z=z_i|\mathbf X)
+$$
+
+Consider the case where $Z$ is some information about the size of claim, namely $Z$ belongs either to $\{Y>s\}$ or $\{Y \leq s\}$ , for some high amount s. Therefore,
+
+$$
+\mathbb E(Y) = \mathbb E(Y|Y>s)*\mathbb P(Y>s) + \mathbb E(Y|Y \leq s)*\mathbb P(Y \leq s)
+$$
+
+As before, in the case where the probability is computed under conditional probability, given $X$, the relationship above becomes
+
+$$
+\mathbb{E}(Y | \mathbf{X}) = \underbrace{\mathbb{E}(Y | \mathbf{X}, Y \leq s)}_{A} \cdot \underbrace{\mathbb{P}(Y \leq s \mid \mathbf{X})}_{C} + \underbrace{\mathbb{E}(Y \mid Y > s, \mathbf{X})}_{B} \cdot \underbrace{\mathbb{P}(Y > s \mid \mathbf{X})}_{C}
+$$
+
+where
+
+-   A is the average cost of normal claims (excluding claims that exceed s)
+
+-   B is the average cost of large claims (those that exceed s)
+
+-   C is the probability of having a large or a normal claim
+
+For part C, a logistic regression can be run. For parts A and B, regression are on subsets of the datasets. Consider a threshold
+
+> s \<- 10000
+
+reached by less than 2% of the claims:
+
+```{r}
+# Definir un umbral para el monto del reclamo
+s <- 10000
+
+# Crear una nueva columna 'STANDARD' en el dataframe 'claims'
+# 'STANDARD' será TRUE si 'ClaimAmount' es menor que el umbral 's', y FALSE en caso contrario
+claims$STANDARD <- (claims$ClaimAmount < s)
+
+# Calcular la media de la columna 'STANDARD'
+# La media representa la proporción de reclamos que tienen un monto menor que el umbral 's'
+mean(claims$STANDARD)
+```
+
+consider a logistic regression to model the probability that a claim will be a standard one:
+
+```{r}
+# Revisión de valores maximo y minimo de edad para los siniestros estandar
+min(claims$DriverAge[claims$STANDARD == TRUE])
+max(claims$DriverAge[claims$STANDARD == TRUE])
+# min y max para los siniestros que NO son estandar
+min(claims$DriverAge[claims$STANDARD == FALSE])
+max(claims$DriverAge[claims$STANDARD == FALSE])
+```
+
+```{r}
+# Cargar la librería 'splines' para funciones de splines
+library(splines)
+
+# Crear una secuencia de edades de 18 a 99
+age <- seq(18, 85)
+
+# Ajustar un modelo de regresión logística utilizando splines en la edad del conductor ('DriverAge')
+# La variable dependiente es 'STANDARD' y se ajusta un modelo binomial
+regC <- glm(STANDARD ~ bs(DriverAge), data = claims, family = binomial)
+
+# Predecir las probabilidades utilizando el modelo ajustado 'regC' para la secuencia de edades 'age'
+# Se calculan las predicciones de respuesta y los errores estándar
+ypC <- predict(regC, newdata = data.frame(DriverAge = age), type = "response", se = TRUE)
+
+# Predecir nuevamente las probabilidades utilizando el modelo ajustado 'regC' para la secuencia de edades 'age'
+# Se calculan las predicciones de respuesta y los errores estándar
+ypC <- predict(regC, newdata = data.frame(DriverAge = age), type = "response", se = TRUE)
+```
+
+```{r}
+# Graficar las predicciones ajustadas 'ypC$fit' frente a la secuencia de edades 'age'
+# El eje y se limita de 0.95 a 1 y se utiliza una línea para la gráfica
+plot(age, ypC$fit, ylim = c(0.95, 1), type = "l")
+
+# Añadir una región sombreada (polígono) para representar el intervalo de confianza de las predicciones
+# El polígono se dibuja utilizando las predicciones más/menos 2 veces el error estándar
+polygon(c(age, rev(age)), c(ypC$fit + 2 * ypC$se.fit, rev(ypC$fit - 2 * ypC$se.fit)), col = "grey", border = NA)
+
+# Añadir una línea horizontal en la media de 'STANDARD' en el conjunto de datos 'claims'
+# La línea es de tipo punteado (lty = 2)
+abline(h = mean(claims$STANDARD), lty = 2)
+```
+
+The figure show the probability of having a standard claim, given that a claim occurred, as a function of the age of the driver. Logistic regression with a spline smoother.
+
+For standard and large claims, consider two gamma regressions on the two subsets,
+
+```{r}
+# Identificar los índices de las filas en 'claims' donde 'ClaimAmount' es menor que el umbral 's'
+indexstandard <- which(claims$ClaimAmount < s)
+
+# Calcular la media de 'ClaimAmount' para las filas con 'ClaimAmount' menor que el umbral 's'
+mean(claims$ClaimAmount[indexstandard])
+
+# Calcular la media de 'ClaimAmount' para las filas con 'ClaimAmount' mayor o igual al umbral 's'
+mean(claims$ClaimAmount[-indexstandard])
+```
+
+```{r}
+# Ajustar un modelo de regresión generalizada (GLM) utilizando 'ClaimAmount' como variable dependiente
+# y splines en la edad del conductor ('DriverAge') como variable independiente, para reclamos menores que el umbral 's'
+# El modelo utiliza una familia Gamma con un enlace logarítmico
+regA <- glm(ClaimAmount ~ bs(DriverAge), data = claims[indexstandard,], family = Gamma(link = "log"))
+
+# Predecir los valores ajustados utilizando el modelo 'regA' para una nueva secuencia de edades 'age'
+ypA <- predict(regA, newdata = data.frame(DriverAge = age), type = "response")
+```
+
+```{r}
+# Ajustar un modelo de regresión generalizada (GLM) utilizando 'ClaimAmount' como variable dependiente
+# y splines en la edad del conductor ('DriverAge') como variable independiente, para reclamos mayores o iguales al umbral 's'
+# El modelo utiliza una familia Gamma con un enlace logarítmico
+regB <- glm(ClaimAmount ~ bs(DriverAge), data = claims[-indexstandard,], family = Gamma(link = "log"))
+
+# Predecir los valores ajustados utilizando el modelo 'regB' para una nueva secuencia de edades de 18 a 85
+ypB <- predict(regB, newdata = data.frame(DriverAge = seq(18, 85)), type = "response")
+```
+
+```{r}
+# Ajustar un modelo de regresión generalizada (GLM) utilizando 'ClaimAmount' como variable dependiente
+# y splines en la edad del conductor ('DriverAge') como variable independiente
+# El modelo utiliza una familia Gamma con un enlace logarítmico
+reg <- glm(ClaimAmount ~ bs(DriverAge), data = claims, family = Gamma(link = "log"))
+
+# Predecir los valores ajustados utilizando el modelo 'reg' para una nueva secuencia de edades 'age'
+yp <- predict(reg, newdata = data.frame(DriverAge = age), type = "response")
+```
+
+```{r}
+# Predecir las probabilidades utilizando el modelo ajustado 'regC' para la secuencia de edades 'age'
+ypC <- predict(regC, newdata = data.frame(DriverAge = age), type = "response")
+
+# Graficar las predicciones ajustadas 'yp' frente a la secuencia de edades 'age'
+# Utilizando una línea con grosor 2, y etiquetando los ejes x e y
+plot(age, yp, type = "l", lwd = 2, ylab = "Average cost", xlab = "Age of the driver")
+
+# Añadir líneas para las combinaciones ponderadas de 'ypC', 'ypA' y 'ypB'
+# Utilizando líneas tipo histograma con color gris y grosor 6
+lines(age, ypC * ypA + (1 - ypC) * ypB, type = "h", col = "grey", lwd = 6)
+
+# Añadir líneas para 'ypC * ypA' utilizando líneas tipo histograma con color negro y grosor 6
+lines(age, ypC * ypA, type = "h", col = "black", lwd = 6)
+
+# Añadir una línea horizontal en la media de 'ClaimAmount' en el conjunto de datos 'claims'
+# La línea es de tipo punteado (lty = 2)
+abline(h = mean(claims$ClaimAmount), lty = 2)
+```
+
+The figure show the average cost of a claim, as a function of the age of the driver, s= 10.000.
+
+```{r}
+# Ajustar el modelo de regresión logística para 'STANDARD' utilizando splines en 'DriverAge'
+regC <- glm(STANDARD ~ bs(DriverAge), data = claims, family = binomial)
+
+# Ajustar el modelo de regresión Gamma para los reclamos menores que el umbral
+regA <- glm(ClaimAmount ~ bs(DriverAge), data = claims[claims$STANDARD, ], family = Gamma(link = "log"))
+
+# Calcular el costo promedio de los reclamos mayores al umbral
+mean_large_claims <- mean(claims$ClaimAmount[claims$ClaimAmount >= s])
+
+# Crear una secuencia de edades de 18 a 99
+age <- seq(18, 99)
+
+# Predecir las probabilidades utilizando el modelo ajustado 'regC' para la secuencia de edades 'age'
+ypC <- predict(regC, newdata = data.frame(DriverAge = age), type = "response")
+
+# Predecir los valores ajustados utilizando el modelo 'regA' para la secuencia de edades 'age'
+ypA <- predict(regA, newdata = data.frame(DriverAge = age), type = "response")
+
+# Calcular el costo promedio ponderado de un reclamo, incluyendo los reclamos grandes distribuidos
+average_cost <- ypC * ypA + (1 - ypC) * mean_large_claims
+
+# Graficar las predicciones ajustadas 'average_cost' frente a la secuencia de edades 'age'
+# Utilizando una línea con grosor 2, y etiquetando los ejes x e y
+plot(age, average_cost, type = "l", lwd = 2, ylab = "Average cost", xlab = "Age of the driver")
+
+# Añadir una línea horizontal en la media de 'ClaimAmount' en el conjunto de datos 'claims'
+# La línea es de tipo punteado (lty = 2)
+abline(h = mean(claims$ClaimAmount), lty = 2)
+```
+
+This figure show cost of average cost of a claim, as a function of the age of the driver, s = 10.000, when extremely large claims are pooled among the insured.
+
+**Implementation example**
+
+```{r}
+# Extraer los coeficientes del modelo logístico
+coef_logistic <- coef(regC)
+
+# Imprimir los coeficientes del modelo logístico
+print("coef_logistic")
+print(coef_logistic)
+
+# Extraer los coeficientes del modelo Gamma
+coef_gamma <- coef(regA)
+
+# Imprimir los coeficientes del modelo Gamma
+print("coef_gamma")
+print(coef_gamma)
+
+# Calcular el costo promedio de los reclamos mayores al umbral
+mean_large_claims <- mean(claims$ClaimAmount[claims$ClaimAmount >= s])
+
+# Imprimir el costo promedio de los reclamos grandes
+print("mean_large_claims")
+print(mean_large_claims)
+```
+
+```{r}
+# Función para calcular la prima esperada en función de la edad del conductor
+calcular_prima <- function(driver_age, coef_logistic, coef_gamma, mean_large_claims) {
+  # Calcular la probabilidad de un reclamo estándar
+  prob_standard <- predict(regC, newdata = data.frame(DriverAge = driver_age), type = "response")
+  
+  # Calcular el costo esperado de un reclamo estándar
+  costo_standard <- predict(regA, newdata = data.frame(DriverAge = driver_age), type = "response")
+  
+  # Calcular la prima esperada
+  prima_esperada <- prob_standard * costo_standard + (1 - prob_standard) * mean_large_claims
+  
+  return(prima_esperada)
+}
+
+# Ejemplo de uso de la función
+driver_age <- 30
+prima <- calcular_prima(driver_age, coef_logistic, coef_gamma, mean_large_claims)
+print(prima)
+
+```
+
+The dotted horizontal line is the average cost of claim. The dark line, is the back, is the prediction on the whole dataset reg. The dark part is the part of the average claim related to standard claims (smaller than s) and lighter area is the part of the average claim due to possible large claims (exceeding s).
+
+For standard and large claims, consider two gamma regressions, on the two subsets. As mentioned earlier, it is possible to substitute constant parts in the pricing model, for example,
+
+$$
+\mathbb{E}(Y | \mathbf{X}) \sim \underbrace{\mathbb{E}(Y | \mathbf{X}, Y \leq s)}_{A} \cdot \underbrace{\mathbb{P}(Y \leq s \mid \mathbf{X})}_{C} + \underbrace{\mathbb{E}(Y \mid Y > s)}_{B_0} \cdot \underbrace{\mathbb{P}(Y > s \mid \mathbf{X})}_{C}
+$$
+
+where $B_0$ is obtained by considering the average cost of large claims, without any explanatory variable.
+
+# More General Model
+
+A more general model can be considered here:
+
+$$\mathbb{E}(Y|\mathbf{X}) = \underbrace{\mathbb{E}(Y|\mathbf{X},Y \leq s_1)}_{A} \cdot \underbrace{\mathbb{P}(Y \leq s_1 | \mathbf{X})}_{D, \pi_1(\mathbf X)} + \underbrace{\mathbb{E}(Y|Y \in (s_1, s_2], \mathbf{X})}_{B} \cdot \underbrace{\mathbb{P}(Y \in (s_1, s_2] | \mathbf{X})}_{D, \pi_2(\mathbf X)} + \underbrace{\mathbb{E}(Y|Y > s_2, \mathbf{X})}_{C} \cdot \underbrace{\mathbb{P}(Y > s_2 | \mathbf{X})}_{D,\pi_3(\mathbf X)}$$
+
+where mixing probabilities $(\pi_1(\mathbf X), \pi_2 (\mathbf X), \pi_3(\mathbf X))$ are associated to a multinomial random variable.
+
+A multinomial regression model can be written, as an extension of the logistic regression one. Assume here that
+
+$$
+(\pi_1, \pi_2, \pi_3) \propto (exp(\mathbf{X^{'} \beta_1}), exp(\mathbf{X^{'}\beta_2}),1)
+$$
+
+The estimation of coefficients $\mathbf{\beta_1}$ and $\mathbf{\beta_2}$ (including standard errors) can be obtained using regression multinom of library(nnet):
+
+```{r include=FALSE}
+library(nnet)
+```
+
+```{r}
+# Definir los umbrales para clasificar los montos de las reclamaciones
+threshold <- c(0, 1150, 10000, Inf)
+
+# Ajustar un modelo de regresión multinomial utilizando las funciones base splines para la edad del conductor
+regD <- multinom(cut(claims$ClaimAmount, breaks = threshold) ~ bs(DriverAge), data = claims)
+
+# Resumen del modelo ajustado
+summary(regD)
+```
+
+For instance, for drivers with age 20 or 50, given that a claim has occurred, the probability that it could be in one of the three tranches will be
+
+```{r}
+predict(regD, newdata = data.frame(DriverAge = c(20,50)), type = "probs")
+```
+
+If we plot the parts due to small claims (less than $s_1$), medim claims (from $s1$ to $s2$), and large claims (more than $s_2$), we obtain the graph
+
+```{r include=FALSE}
+library(ggplot2)
+```
+
+```{r}
+# Crear una secuencia de edades para predecir
+age <- seq(18, 99)
+
+# Predecir las probabilidades utilizando el modelo ajustado 'regD' para la secuencia de edades 'age'
+ypD <- predict(regD, newdata = data.frame(DriverAge = age), type = "probs")
+
+# Calcular el costo promedio de una reclamación
+average_claim_cost <- mean(claims$ClaimAmount)
+
+# Calcular los promedios de las reclamaciones en cada partición
+mean_A <- mean(claims$ClaimAmount[claims$ClaimAmount <= threshold[2]])
+mean_B <- mean(claims$ClaimAmount[claims$ClaimAmount > threshold[2] & claims$ClaimAmount <= threshold[3]])
+mean_C <- mean(claims$ClaimAmount[claims$ClaimAmount > threshold[3]])
+
+# Calcular las combinaciones ponderadas de 'ypD' utilizando los promedios calculados
+ypA <- ypD[,1] * mean_A
+ypB <- ypD[,2] * mean_B
+ypC <- ypD[,3] * mean_C
+
+# Graficar las predicciones ajustadas
+plot(age, ypA + ypB + ypC, type = "l", lwd = 2, ylab = "Average cost", xlab = "Age of the driver")
+
+# Añadir líneas para las combinaciones ponderadas de 'ypA' y 'ypB'
+lines(age, ypA + ypB, type = "h", col = "grey", lwd = 6)
+
+# Añadir líneas para 'ypA' utilizando líneas tipo histograma con color negro y grosor 6
+lines(age, ypA, type = "h", col = "black", lwd = 6)
+
+# Añadir una línea horizontal en la media de 'ClaimAmount' en el conjunto de datos 'claims'
+abline(h = average_claim_cost, lty = 2)
+```
+
+# Modeling Compound Sum with Tweedie Regression
+
+As a conclusion, we can metion a large class of Generalized Linear Models, called Tweedie models in Jorgensen (1987), studied in Jorgensen (1997). A Tweedie distribution is in the exponential family, and it satisfies
+
+$$
+var(Y) = \varphi[\mathbb E(Y)]^p
+$$
+
+If $p=0$ is the distribution with constant variance (normal distribution), if $p=1$, then the variance function is linear (Poisson distribution); and if $p=2$ it has a quadratic variance function (Gamma distribution).
+
+An interesting case is when $p$ lies in the interval (1,2). In that case, $Y$ is a compound Poisson-Gamma distribution. A natural idea is then to use a Tweedie model on the aggregated sum, per insured.
+
+```{r}
+A <- tapply(freMTPLsev$ClaimAmount,freMTPLsev$PolicyID,sum)
+ADF <- data.frame(PolicyID = names(A), ClaimAmount = as.vector(A) )
+CT <- merge(CONTRACTS.f,ADF,all.x = TRUE)
+CT$ClaimAmount[is.na(CT$ClaimAmount)] <- 0
+tail(CT)
+```
+
+```{r}
+CT.f <- merge(CONTRACTS.f,ADF,all.x = TRUE)
+CT.f$ClaimAmount[is.na(CT.f$ClaimAmount)] <- 0
+tail(CT.f)
+```
+
+```{r include=FALSE}
+library(tweedie)
+library(statmod)
+```
+
+```{r}
+out <- tweedie.profile(ClaimAmount ~ Power + AGECAR + AGEDRIVE + BRAND + Gas + DENSITY, data=CT.f, p.vec=seq(1.4,1.7,by=.05) )
+```
+
+```{r}
+out$p.max
+plot(out,type="b")
+abline(v=out$p.max,lty=2)
+```
+
+This figure show profiles likelihood of a Tweedie regression, as a function of p.
+
+In order to ensure convergence of the algorithm, we can use coefficients obtained from a Poisson regression:
+
+```{r}
+reg1 <- glm(ClaimAmount ~ Power + AGECAR + AGEDRIVE + BRAND + Gas + DENSITY, data = CT.f, family = tweedie(var.power = 1, link.power = 0))
+```
+
+The following function returns $\hat \beta^{(p)}$ as a function of $p$:
+
+```{r}
+coef <- function(p){
+  glm(ClaimAmount ~ Power + AGECAR + AGEDRIVE + BRAND + Gas + DENSITY,data=CT.f, family = tweedie(var.power = p, link.power = 0),start=reg1$coefficients)$coefficients
+  }
+```
+
+It is also possible to visualize the evolution of the coefficients estimates as a function of $p$ (without the (Intercept)), with logarithm link function:
+
+```{r}
+vp <- seq(1,2,by=.1)
+Cp <- Vectorize(coef)(vp)
+matplot(vp,t(Cp[-1,]),type="l")
+text(2,Cp[-1,length(vp)],rownames(Cp[-1,]),cex=.5,pos=4)
+```
+
+This figure show evolution of $\hat \beta^{(p)}$ from a Tweedie regression as a function of $p$.
+
+One can also use library cplm for fitting Tweedie compound Poisson linear models. Smyth & Jorgensen (2002) suggested a Tweddie model using a joint likelihood function (for claim cost and frequency).
